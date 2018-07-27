@@ -1,5 +1,5 @@
 import pretty_midi
-import music21
+from music21 import converter, instrument, note, chord, stream
 import numpy as np
 from scipy.stats import entropy
 
@@ -19,120 +19,124 @@ N_OCTAVES = 3
 SAMPLE_FREQUENCY = 1000
 SEQUENCE_LENGTH = 25
 
-'''
-def transpose_to_common(MIDI_src_folder,dest_dir):
-	midi_src_path = PATH_MIDI_SRC + MIDI_src_folder + '/*.mid'
-	midi_files = glob.glob(midi_src_path)
-	keys = []
-	for midi_file in midi_files:
-		print(midi_file)
-		score = music21.converter.parse(midi_file)
-		key = score.analyze('Krumhansl')
-		key_num = pretty_midi.key_name_to_key_number(key.tonic.name.replace('-','b') + " Major")
-		print(key,key_num) 
-		keys.append((midi_file,key_num))
-		transposed_path = PATH_MIDI_SRC + MIDI_src_folder + '/transposed/'
-	os.makedirs(os.path.dirname(transposed_path),exist_ok=True)
-	for (midi_file,key_num) in keys:
-		dest_path = dest_dir + os.path.basename(midi_file)
-		if(key_num != 0):
-			print('Dest path: %s' % (dest_path))
-			_transpose(midi_file,-key_num,dest_path)
-		else:
-			copyfile(midi_file,dest_path)
-'''
-
-def _transpose(pretty_midi_obj,k):
-	print("Transposing.")
-	for note in pretty_midi_obj.notes:
-		note.pitch += k
-	return pretty_midi_obj
+def _transpose(note_list,k):
+	print("Transposing")
+	lowest = 127
+	highest = 0
+	for note_i in note_list:
+		if(note_i.pitch.midi < lowest):
+			note_l = note_i
+			lowest = note_i.pitch.midi
+	lowest_octave = note_l.pitch.implicitOctave # Find octave of the lowest note in list
+	print("Octave: %d" % (lowest_octave))
+	for note_i in note_list:
+		note_i = note_i.transpose(k-(lowest_octave-1)*12)
+	return note_list
 
 # Determines which MIDI channel best represents melody, based on mean of pitch and entropy
-def _extract_melody(instr_list):
-	print("Extracting melody channel.")
-	n = len(instr_list)
+def _extract_melody(midi_obj):
+	print("Extracting melody channel")
+	n = len(midi_obj) # Number of parts
 	means = np.zeros(n)
 	norm_entr = np.zeros(n)
-	w = 2.5 # Weight for how much to take entropy into account vs mean pitch
+	w = 1.5 # Weight for how much to take entropy into account vs mean pitch
 	i = 0
-	for instrument in instr_list:
+	for part in midi_obj:
 		# Pitch average
-		note_matrix = np.array(instr.notes) # Convert one hot encoding to single integers
-		means[i] = note_matrix.mean()
+		elements = list(part.flat.notes)#[note.pitch for note in instrument.notes]
+		pitch_list = [element.pitch.midi for element in elements if isinstance(element,note.Note)]
+		means[i] = np.array(pitch_list).mean()
 		# Normalized entropy
-		hist = matrix[:,0:128].sum(axis=0)
+		hist = np.zeros(128)
+		for idx in range(0,128):
+			hist[idx] = pitch_list.count(idx)
 		p = hist/hist.sum()
 		norm_entr[i] = entropy(p)/(np.log2(p.shape[0]))
 		i += 1
+
 	# Heuristics function of melody (means: 0 - 127, norm_entr: 0 - 1)
 	heur = means + 127*w*norm_entr
 	melody_idx = np.argmax(heur)
-	return instr_list[melody_idx]
+	print(melody_idx)
+	note_list = [element for element in list(midi_obj[melody_idx].flat.notes) if isinstance(element,note.Note)]
+	return note_list
 
-def _determine_key(midi_file_path):
+def _determine_key(midi_obj):
 	print("Determining key: ")
-	score = music21.converter.parse(midi_file)
-	key = score.analyze('Krumhansl')
+	key = midi_obj.analyze('Krumhansl')
 	print(key)
 	key_num = pretty_midi.key_name_to_key_number(key.tonic.name.replace('-','b') + " Major")
 	return key_num
 
 # Extract the melody pattern from list of notes (might be polyphonic) with the highest pitch
-def _toMonophonic(notes):
-	print("Converting to monophonic.")
+def _toMonophonic(note_list):
+	print("Converting to monophonic")
 	# Remove all notes that have ending after a higher note starts
-	for note in notes:
-		higher = [note_2 for note_2 in notes if ((note_2.start < note.end) & (note_2.pitch > note.pitch))]
+	for note_1 in note_list:
+		higher = [note_2 for note_2 in note_list if ((note_2.offset == note_1.offset) & (note_2.pitch.midi > note_1.pitch.midi))]
 		if(len(higher) > 0):
-			notes.remove(note)
-	return notes
+			note_list.remove(note_1)
+	return note_list
 
 # Convert one MIDI channel into compressed numpy matrix with monophonic one hot encoded notes + duration + rests
-def _midiToMatrix(pretty_midi_obj,sample_frequency,n_octaves):
-	print("Converting MIDI to matrix.")
+def _midiToMatrix(note_list,sample_frequency,n_octaves):
+	print("Converting MIDI to matrix")
 	interval_s = 1/sample_frequency
-	notes = _toMonophonic(pretty_midi_obj.notes)
-	n_notes = len(notes)
+	note_list = _toMonophonic(note_list)
+	n_notes = len(note_list)
 	note_range = 12*n_octaves
 	n_features = note_range + 2
 	matrix = np.zeros((n_notes,n_features))
 	i = 0
-	prev_note = notes[0]
-	for note in notes:
+	for i in range(0,n_notes):
+		last = i == n_notes-1
 		# p = pitch, d = duration, r = rest before note
-		p = note.pitch % note_range
-		d = note.end - note.start
-		r = note.start - prev_note.end
+		p = note_list[i].pitch.midi % note_range
+		end_i = note_list[i].offset + note_list[i].duration.quarterLength
+		start_i = note_list[i].offset 
+		if(not last):
+			if(end_i > note_list[i+1].offset):
+				d = note_list[i+1].offset - start_i
+				r = 0
+			else:
+				d = end_i - start_i
+				r = note_list[i+1].offset - end_i
+		else:
+			d = end_i - start_i
 		matrix[i,p] = 1
 		matrix[i,note_range] = d
-		matrix[i,note_range + 1] = r
-		prev_note = note
+		if(not last):
+			matrix[i+1,note_range + 1] = r
 		i += 1
 	return matrix
 
-def _matrixToMidi(matrix,dest_path):
+def _matrixToMidi(matrix,dest_path,transpose_octaves):
 	print("Converting matrix to MIDI")
 	# Create a PrettyMIDI object
-	midi_obj = pretty_midi.PrettyMIDI()
+	#midi_obj = pretty_midi.PrettyMIDI()
 	# Create an Instrument instance for a Piano instrument
 	piano_program = pretty_midi.instrument_name_to_program('Acoustic Grand Piano')
 	piano = pretty_midi.Instrument(program=piano_program)
 	t = 0.0
 	note_range = matrix.shape[1] - 2
-	notes = [ np.where(r==1)[0][0] for r in matrix[:,0:note_range] ] # Convert one hot encoding to single integers
-	n_notes = len(notes) # Number of consecutive notes
-	print("Writing %d notes to MIDI file" % (n_notes))
+	note_list = [ np.where(r==1)[0][0] for r in matrix[:,0:note_range] ] # Convert one hot encoding to single integers
+	n_notes = len(note_list) # Number of consecutive notes
+	output_notes = []
 	for i in range(0,n_notes):
-		p = notes[i]
+		p = note_list[i] + transpose_octaves*12
 		rest = matrix[i,note_range + 1] # Rest before note
 		s = t + rest # Start = current time + rest before note
-		e = s + matrix[i,note_range] #End = start + duration of note in seconds
-		note = pretty_midi.Note(velocity=100, pitch=p, start=s, end=e)
-		piano.notes.append(note)
-		t = e
-	midi_obj.instruments.append(piano)
-	midi_obj.write(dest_path)
+		d = matrix[i,note_range]
+		t = s + d #End = start + duration of note in seconds
+		new_note = note.Note()
+		new_note.pitch.midi = p
+		new_note.quarterLength = d
+		new_note.offset = s
+		new_note.storedInstrument = instrument.Piano()
+		output_notes.append(new_note)
+	midi_stream = stream.Stream(output_notes)
+	midi_stream.write('midi', fp=dest_path)
+	print("%d notes written to MIDI file" % (n_notes))
 
 def _matrixToNumpy(matrix,dest_path):
 	with open(dest_path, 'wb') as filepath:
@@ -182,35 +186,37 @@ def _prepare_sequences(matrix,sequence_length):
 
 def preprocess_pipeline(MIDI_src_folder):
 	midi_src_directory = PATH_MIDI_SRC + MIDI_src_folder + '/**/*.mid'
-	data_idx = len(glob.glob(PATH_DATA + MIDI_src_folder + '/'))
-	output_directory = PATH_DATA + MIDI_src_folder + data_idx + '/'
+	data_idx = len(glob.glob(PATH_DATA + MIDI_src_folder + '*/'))
+	output_directory = PATH_DATA + MIDI_src_folder + str(data_idx) + '/'
 	os.makedirs(os.path.dirname(output_directory),exist_ok=True)
 	os.makedirs(os.path.dirname(output_directory + 'MIDI/'),exist_ok=True)
 	os.makedirs(os.path.dirname(output_directory + 'matrix/'),exist_ok=True)
 	midi_files = glob.glob(midi_src_directory, recursive=True)
 	n = len(midi_files)
 	file_idx = 0
+	print("Processing MIDI files in %s. Dumping results in %s....." % (midi_src_directory,output_directory))
 	for midi_file in midi_files:
+		print("MIDI file %s, %d / %d" % (midi_file,file_idx,n))
+		midi_obj = converter.parse(midi_file)
 		# 1. Determine key
-		key = _determine_key(midi_file)
+		key = _determine_key(midi_obj)
 		# 2. Extract melody channel
-		midi_obj = pretty_midi.PrettyMIDI(midi_file)
-		melody_obj = _extract_melody(midi_obj.instruments)
+		melody_notes = _extract_melody(midi_obj)
 		# 3. Transpose to C
-		melody_obj = _transpose(melody_obj,-key)
+		melody_notes = _transpose(melody_notes,-key)
 		# 4. All notes to 0 - 35 and convert to numpy Matrix
-		matrix = _midiToMatrix(melody_obj,SAMPLE_FREQUENCY,N_OCTAVES)
+		matrix = _midiToMatrix(melody_notes,SAMPLE_FREQUENCY,N_OCTAVES)
 		# 5. Generate MIDI sample of matrix
 		midi_sample_path = output_directory + 'MIDI/' + str(file_idx) + os.path.basename(midi_file)
-		_matrixToMidi(matrix,midi_sample_path)
+		_matrixToMidi(matrix,midi_sample_path, 2)
 		# 6. Store matrix in numpy file
 		numpy_filepath = output_directory + 'matrix/' + str(file_idx) + os.path.basename(midi_file)[:-4]
 		_matrixToNumpy(matrix,numpy_filepath)
 
 		file_idx += 1
 	# 7. Generate one tensor of all generated matrices in sequence form suitable for LSTM network
-	matrix_directory = PATH_DATA + 'matrix/'
-	_generate_sequence_tensor(matrix_directory,PATH_TRAINING_DATA)
+	#matrix_directory = PATH_DATA + 'matrix/'
+	#_generate_sequence_tensor(matrix_directory,PATH_TRAINING_DATA)
 
 if __name__ == '__main__':
 	#Store user arguments in list
