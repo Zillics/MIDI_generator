@@ -22,16 +22,15 @@ SEQUENCE_LENGTH = 25
 def _transpose(note_list,k):
 	print("Transposing")
 	lowest = 127
-	highest = 0
+	note_list_output = []
 	for note_i in note_list:
 		if(note_i.pitch.midi < lowest):
 			note_l = note_i
 			lowest = note_i.pitch.midi
 	lowest_octave = note_l.pitch.implicitOctave # Find octave of the lowest note in list
-	print("Octave: %d" % (lowest_octave))
 	for note_i in note_list:
-		note_i = note_i.transpose(k-(lowest_octave-1)*12)
-	return note_list
+		note_i.pitch = note_i.pitch.transpose(k-(lowest_octave+1)*12)
+	return 0
 
 # Determines which MIDI channel best represents melody, based on mean of pitch and entropy
 def _extract_melody(midi_obj):
@@ -92,6 +91,7 @@ def _midiToMatrix(note_list,sample_frequency,n_octaves):
 		last = i == n_notes-1
 		# p = pitch, d = duration, r = rest before note
 		p = note_list[i].pitch.midi % note_range
+		print("%d mod %d = %d" % (note_list[i].pitch.midi,note_range,p))
 		end_i = note_list[i].offset + note_list[i].duration.quarterLength
 		start_i = note_list[i].offset 
 		if(not last):
@@ -130,6 +130,7 @@ def _matrixToMidi(matrix,dest_path,transpose_octaves):
 		t = s + d #End = start + duration of note in seconds
 		new_note = note.Note()
 		new_note.pitch.midi = p
+		#print(p)
 		new_note.quarterLength = d
 		new_note.offset = s
 		new_note.storedInstrument = instrument.Piano()
@@ -203,12 +204,14 @@ def preprocess_pipeline(MIDI_src_folder):
 		# 2. Extract melody channel
 		melody_notes = _extract_melody(midi_obj)
 		# 3. Transpose to C
-		melody_notes = _transpose(melody_notes,-key)
+		_transpose(melody_notes,-key)
+		#for note_i in melody_notes:
+		#	print((note_i.pitch,note_i.pitch.implicitOctave))
 		# 4. All notes to 0 - 35 and convert to numpy Matrix
 		matrix = _midiToMatrix(melody_notes,SAMPLE_FREQUENCY,N_OCTAVES)
 		# 5. Generate MIDI sample of matrix
 		midi_sample_path = output_directory + 'MIDI/' + str(file_idx) + os.path.basename(midi_file)
-		_matrixToMidi(matrix,midi_sample_path, 2)
+		_matrixToMidi(matrix,midi_sample_path, 4)
 		# 6. Store matrix in numpy file
 		numpy_filepath = output_directory + 'matrix/' + str(file_idx) + os.path.basename(midi_file)[:-4]
 		_matrixToNumpy(matrix,numpy_filepath)
