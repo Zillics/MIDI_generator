@@ -3,6 +3,7 @@ from music21 import converter, instrument, note, chord, stream
 import numpy as np
 from scipy.stats import entropy
 
+from fractions import Fraction
 import pickle
 import glob
 import re
@@ -20,8 +21,8 @@ SAMPLE_FREQUENCY = 1000
 SEQUENCE_LENGTH = 25
 
 def _transpose(note_list,k):
-	print("Transposing")
-	lowest = 127
+	#print("Transposing")
+	lowest = 1270
 	note_list_output = []
 	for note_i in note_list:
 		if(note_i.pitch.midi < lowest):
@@ -34,7 +35,7 @@ def _transpose(note_list,k):
 
 # Determines which MIDI channel best represents melody, based on mean of pitch and entropy
 def _extract_melody(midi_obj):
-	print("Extracting melody channel")
+	#print("Extracting melody channel")
 	n = len(midi_obj) # Number of parts
 	means = np.zeros(n)
 	norm_entr = np.zeros(n)
@@ -56,20 +57,20 @@ def _extract_melody(midi_obj):
 	# Heuristics function of melody (means: 0 - 127, norm_entr: 0 - 1)
 	heur = means + 127*w*norm_entr
 	melody_idx = np.argmax(heur)
-	print(melody_idx)
+	#print(melody_idx)
 	note_list = [element for element in list(midi_obj[melody_idx].flat.notes) if isinstance(element,note.Note)]
 	return note_list
 
 def _determine_key(midi_obj):
-	print("Determining key: ")
+	#print("Determining key: ")
 	key = midi_obj.analyze('Krumhansl')
-	print(key)
+	#print(key)
 	key_num = pretty_midi.key_name_to_key_number(key.tonic.name.replace('-','b') + " Major")
 	return key_num
 
 # Extract the melody pattern from list of notes (might be polyphonic) with the highest pitch
 def _toMonophonic(note_list):
-	print("Converting to monophonic")
+	#print("Converting to monophonic")
 	# Remove all notes that have ending after a higher note starts
 	for note_1 in note_list:
 		higher = [note_2 for note_2 in note_list if ((note_2.offset == note_1.offset) & (note_2.pitch.midi > note_1.pitch.midi))]
@@ -79,7 +80,7 @@ def _toMonophonic(note_list):
 
 # Convert one MIDI channel into compressed numpy matrix with monophonic one hot encoded notes + duration + rests
 def _midiToMatrix(note_list,sample_frequency,n_octaves):
-	print("Converting MIDI to matrix")
+	#print("Converting MIDI to matrix")
 	interval_s = 1/sample_frequency
 	note_list = _toMonophonic(note_list)
 	n_notes = len(note_list)
@@ -91,9 +92,13 @@ def _midiToMatrix(note_list,sample_frequency,n_octaves):
 		last = i == n_notes-1
 		# p = pitch, d = duration, r = rest before note
 		p = note_list[i].pitch.midi % note_range
-		print("%d mod %d = %d" % (note_list[i].pitch.midi,note_range,p))
-		end_i = note_list[i].offset + note_list[i].duration.quarterLength
-		start_i = note_list[i].offset 
+		#print("%d mod %d = %d" % (note_list[i].pitch.midi,note_range,p))
+		if(isinstance(note_list[i].quarterLength,Fraction)):
+			dur_i = note_list[i].quarterLength.numerator/note_list[i].quarterLength.denominator
+		else:
+			dur_i = note_list[i].quarterLength
+		end_i = note_list[i].offset + dur_i
+		start_i = note_list[i].offset
 		if(not last):
 			if(end_i > note_list[i+1].offset):
 				d = note_list[i+1].offset - start_i
@@ -111,7 +116,7 @@ def _midiToMatrix(note_list,sample_frequency,n_octaves):
 	return matrix
 
 def _matrixToMidi(matrix,dest_path,transpose_octaves):
-	print("Converting matrix to MIDI")
+	#print("Converting matrix to MIDI")
 	# Create a PrettyMIDI object
 	#midi_obj = pretty_midi.PrettyMIDI()
 	# Create an Instrument instance for a Piano instrument
@@ -143,13 +148,15 @@ def _matrixToNumpy(matrix,dest_path):
 	with open(dest_path, 'wb') as filepath:
 		pickle.dump(matrix, filepath)
 
-def _generate_sequence_tensor(matrix_directory,tensor_directory):
+def _generate_sequence_tensor(matrix_directory,tensor_directory,n_octaves):
 	files = glob.glob(matrix_directory + '*')
-	n_features = N_OCTAVES*12 + 2
+	n = len(files)
+	n_features = n_octaves*12 + 2
 	n_sequences = 0
 	X_all = np.zeros((n_sequences,SEQUENCE_LENGTH,n_features),dtype=np.float32)
 	y_all = np.zeros((n_sequences,n_features),dtype=np.float32)
 	k = 0
+	print("Based on %s , generating sequences for training data tensor....." % (matrix_directory + '*'))
 	for file in files:
 		with open(file, 'rb') as filepath:
 			matrix = np.array(pickle.load(filepath),dtype=np.float32)
@@ -157,6 +164,7 @@ def _generate_sequence_tensor(matrix_directory,tensor_directory):
 			(X,y) = _prepare_sequences(matrix,SEQUENCE_LENGTH)
 		except Exception as e:
 			print(e)
+			_log(tensor_directory + 'log',file,e)
 			print("Preparing sequences failed. Skipping this track.")
 			k += 1
 		else:
@@ -166,6 +174,8 @@ def _generate_sequence_tensor(matrix_directory,tensor_directory):
 			k += 1
 			print("Sequences so far: %d : " % (n_sequences))
 			print("Completed: %d / %d" % (k,n))
+	_matrixToNumpy(X_all,tensor_directory + 'X')
+	_matrixToNumpy(y_all,tensor_directory + 'y') 
 
 
 def _prepare_sequences(matrix,sequence_length):
@@ -184,46 +194,57 @@ def _prepare_sequences(matrix,sequence_length):
 		y[i,:] = sequence_out
 	return (X,y)
 
+def _log(logfile_path,file,exception):
+	with open(logfile_path, 'a') as f:
+		log_str = file + ": " + str(exception) + '\n'
+		f.write(log_str)
+
 
 def preprocess_pipeline(MIDI_src_folder):
 	midi_src_directory = PATH_MIDI_SRC + MIDI_src_folder + '/**/*.mid'
 	data_idx = len(glob.glob(PATH_DATA + MIDI_src_folder + '*/'))
-	output_directory = PATH_DATA + MIDI_src_folder + str(data_idx) + '/'
+	output_directory = PATH_DATA + MIDI_src_folder + '_' + str(data_idx) + '/'
 	os.makedirs(os.path.dirname(output_directory),exist_ok=True)
 	os.makedirs(os.path.dirname(output_directory + 'MIDI/'),exist_ok=True)
 	os.makedirs(os.path.dirname(output_directory + 'matrix/'),exist_ok=True)
 	midi_files = glob.glob(midi_src_directory, recursive=True)
+	logfile_path = output_directory + 'log'
 	n = len(midi_files)
 	file_idx = 0
 	print("Processing MIDI files in %s. Dumping results in %s....." % (midi_src_directory,output_directory))
 	for midi_file in midi_files:
 		print("MIDI file %s, %d / %d" % (midi_file,file_idx,n))
-		midi_obj = converter.parse(midi_file)
-		# 1. Determine key
-		key = _determine_key(midi_obj)
-		# 2. Extract melody channel
-		melody_notes = _extract_melody(midi_obj)
-		# 3. Transpose to C
-		_transpose(melody_notes,-key)
-		#for note_i in melody_notes:
-		#	print((note_i.pitch,note_i.pitch.implicitOctave))
-		# 4. All notes to 0 - 35 and convert to numpy Matrix
-		matrix = _midiToMatrix(melody_notes,SAMPLE_FREQUENCY,N_OCTAVES)
-		# 5. Generate MIDI sample of matrix
-		midi_sample_path = output_directory + 'MIDI/' + str(file_idx) + os.path.basename(midi_file)
-		_matrixToMidi(matrix,midi_sample_path, 4)
-		# 6. Store matrix in numpy file
-		numpy_filepath = output_directory + 'matrix/' + str(file_idx) + os.path.basename(midi_file)[:-4]
-		_matrixToNumpy(matrix,numpy_filepath)
+		try:
+			midi_obj = converter.parse(midi_file)
+			# 1. Determine key
+			key = _determine_key(midi_obj)
+			# 2. Extract melody channel
+			melody_notes = _extract_melody(midi_obj)
+			# 3. Transpose to C
+			_transpose(melody_notes,-key)
+			#for note_i in melody_notes:
+			#	print((note_i.pitch,note_i.pitch.implicitOctave))
+			# 4. All notes to 0 - 35 and convert to numpy Matrix
+			matrix = _midiToMatrix(melody_notes,SAMPLE_FREQUENCY,N_OCTAVES)
+			# 5. Generate MIDI sample of matrix
+			midi_sample_path = output_directory + 'MIDI/' + str(file_idx) + '_' + os.path.basename(midi_file)
+			_matrixToMidi(matrix,midi_sample_path, 4)
+			# 6. Store matrix in numpy file
+			numpy_filepath = output_directory + 'matrix/' + str(file_idx) + '_'  + os.path.basename(midi_file)[:-4]
+			_matrixToNumpy(matrix,numpy_filepath)
+		except Exception as e:
+			_log(logfile_path,midi_file,e)
+			print(e)
 
 		file_idx += 1
 	# 7. Generate one tensor of all generated matrices in sequence form suitable for LSTM network
-	#matrix_directory = PATH_DATA + 'matrix/'
-	#_generate_sequence_tensor(matrix_directory,PATH_TRAINING_DATA)
+	matrix_directory = output_directory + 'matrix/'
+	tensor_directory = PATH_TRAINING_DATA + MIDI_src_folder + '_' + str(data_idx) + '/'
+	os.makedirs(os.path.dirname(tensor_directory),exist_ok=True)
+	_generate_sequence_tensor(matrix_directory,tensor_directory,N_OCTAVES)
 
 if __name__ == '__main__':
 	#Store user arguments in list
 	arguments = sys.argv
 	#Main function
-	#transpose_to_common(arguments[1])
 	preprocess_pipeline(arguments[1])
